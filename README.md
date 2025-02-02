@@ -1,0 +1,2 @@
+# chatserver
+基于MUDUO实现的集群聊天服务器，并使用NGINX实现负载均衡，以及使用redis实现跨服务器通信
