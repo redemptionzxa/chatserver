@@ -15,11 +15,17 @@ using json = nlohmann::json;
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <semaphore.h>
+#include <atomic>
 
 #include "group.hpp"
 #include "user.hpp"
 #include "public.hpp"
 
+// 读写通信量
+sem_t rwsem;
+// 记录登陆状态
+std::atomic_bool g_isLoginSuccess(false);
 // 当前登陆用户
 User g_currentUser;
 // 好友列表
@@ -94,6 +100,12 @@ int main(int argc, char *argv[])
         close(clientfd);
         exit(-1);
     }
+    // 初始化信号量
+    sem_init(&rwsem, 0, 0);
+    // 启动子线程
+    std::thread readTask(readTaskHandler, clientfd);
+    readTask.detach();
+
     while (true)
     {
         std::cout << "====================" << std::endl;
@@ -123,110 +135,19 @@ int main(int argc, char *argv[])
             js["password"] = pwd;
             std::string request = js.dump();
 
+            g_isLoginSuccess = false;
+
             int len = send(clientfd, request.c_str(), strlen(request.c_str()) + 1, 0);
             if (len == -1)
             {
                 std::cerr << "send error" << request << std::endl;
             }
-            else
+            // 等待读线程消息
+            sem_wait(&rwsem);
+            if (g_isLoginSuccess)
             {
-                char buffer[1024] = {0};
-                len = recv(clientfd, buffer, 1024, 0);
-                if (-1 == len)
-                {
-                    std::cerr << "recv error" << std::endl;
-                }
-                else
-                {
-                    json responsejs = json::parse(buffer);
-                    if (0 != responsejs["errno"].get<int>())
-                    {
-                        std::cerr << "login fail!" << std::endl
-                                  << responsejs["errmsg"] << std::endl;
-                    }
-                    else
-                    {
-                        g_currentUserFriendList.clear();
-                        g_currentUserGroupList.clear();
-                        g_currentUser.setId(responsejs["id"].get<int>());
-                        g_currentUser.setName(responsejs["name"]);
-                        // 查询好友
-                        if (responsejs.contains("friends"))
-                        {
-                            std::vector<std::string> vec = responsejs["friends"];
-                            for (std::string &str : vec)
-                            {
-                                json js = json::parse(str);
-                                User user;
-                                user.setId(js["id"].get<int>());
-                                user.setName(js["name"]);
-                                user.setState(js["state"]);
-                                g_currentUserFriendList.push_back(user);
-                            }
-                        }
-                        // 查询群组
-                        if (responsejs.contains("groups"))
-                        {
-                            std::vector<std::string> vec1 = responsejs["groups"];
-                            for (std::string &groupstr : vec1)
-                            {
-                                json grpjs = json::parse(groupstr);
-                                Group group;
-                                group.setId(grpjs["id"].get<int>());
-                                group.setName(grpjs["groupname"]);
-                                group.setDesc(grpjs["groupdesc"]);
-
-                                std::vector<std::string> vec2 = grpjs["users"];
-                                for (std::string &userstr : vec2)
-                                {
-                                    GroupUser user;
-                                    json js = json::parse(userstr);
-                                    user.setId(js["id"].get<int>());
-                                    user.setName(js["name"]);
-                                    user.setState(js["state"]);
-                                    user.setRole(js["role"]);
-                                    group.getUsers().push_back(user);
-                                }
-                                g_currentUserGroupList.push_back(group);
-                            }
-                        }
-                        // 显示用户信息
-                        showCurrentUserData();
-                        // 接收离线消息
-                        if (responsejs.contains("offlinemsg"))
-                        {
-                            std::vector<std::string> vec = responsejs["offlinemsg"];
-                            for (std::string &str : vec)
-                            {
-                                json js = json::parse(str);
-                                int msgtype = js["msgid"].get<int>();
-                                if (ONE_CHAT_MSG == msgtype)
-                                {
-                                    std::cout << js["time"].get<std::string>() << "[" << js["id"] << "]"
-                                              << js["name"].get<std::string>() << "said: "
-                                              << js["msg"].get<std::string>() << std::endl;
-                                }
-                                else if (GROUP_CHAT_MSG == msgtype)
-                                {
-                                    std::cout << "群消息[" << js["groupid"] << "]"
-                                              << js["time"].get<std::string>() << "[" << js["id"] << "]"
-                                              << js["name"].get<std::string>() << "said: "
-                                              << js["msg"].get<std::string>() << std::endl;
-                                }
-                            }
-                        }
-                        //只启动一次
-                        static int threadnumber = 0;
-                        if(threadnumber == 0)
-                        {
-                            threadnumber++;
-                            std::thread readTask(readTaskHandler, clientfd);
-                            readTask.detach();
-                        }
-                        isMainMenuRunning = true;
-                        mainMenu(clientfd);
-                    }
-                }
+                isMainMenuRunning = true;
+                mainMenu(clientfd);
             }
         }
         break;
@@ -250,32 +171,12 @@ int main(int argc, char *argv[])
             {
                 std::cerr << "send error" << request << std::endl;
             }
-            else
-            {
-                char buffer[1024] = {0};
-                len = recv(clientfd, buffer, 1024, 0);
-                if (-1 == len)
-                {
-                    std::cerr << "recv error" << std::endl;
-                }
-                else
-                {
-                    json responsejs = json::parse(buffer);
-                    if (0 != responsejs["errno"].get<int>())
-                    {
-                        std::cerr << name << "is already exist,register error!" << std::endl;
-                    }
-                    else
-                    {
-                        std::cout << name << "register success,userid is " << responsejs["id"]
-                                  << ",do not forget it!" << std::endl;
-                    }
-                }
-            }
+            sem_wait(&rwsem);
         }
         break;
         case 3:
             close(clientfd);
+            sem_destroy(&rwsem);
             exit(0);
             break;
         default:
@@ -284,6 +185,102 @@ int main(int argc, char *argv[])
         }
     }
     return 0;
+}
+
+void doRegResponse(json &responsejs)
+{
+    if (0 != responsejs["errno"].get<int>())
+    {
+        std::cerr  << "name is already exist,register error!" << std::endl;
+    }
+    else
+    {
+        std::cout << "name register success,userid is " << responsejs["id"]
+                  << ",do not forget it!" << std::endl;
+    }
+}
+
+void doLoginResponse(json &responsejs)
+{
+    if (0 != responsejs["errno"].get<int>())
+    {
+        std::cerr << "login fail!" << std::endl
+                  << responsejs["errmsg"] << std::endl;
+        g_isLoginSuccess = false;
+    }
+    else
+    {
+        g_currentUserFriendList.clear();
+        g_currentUserGroupList.clear();
+        g_currentUser.setId(responsejs["id"].get<int>());
+        g_currentUser.setName(responsejs["name"]);
+        // 查询好友
+        if (responsejs.contains("friends"))
+        {
+            std::vector<std::string> vec = responsejs["friends"];
+            for (std::string &str : vec)
+            {
+                json js = json::parse(str);
+                User user;
+                user.setId(js["id"].get<int>());
+                user.setName(js["name"]);
+                user.setState(js["state"]);
+                g_currentUserFriendList.push_back(user);
+            }
+        }
+        // 查询群组
+        if (responsejs.contains("groups"))
+        {
+            std::vector<std::string> vec1 = responsejs["groups"];
+            for (std::string &groupstr : vec1)
+            {
+                json grpjs = json::parse(groupstr);
+                Group group;
+                group.setId(grpjs["id"].get<int>());
+                group.setName(grpjs["groupname"]);
+                group.setDesc(grpjs["groupdesc"]);
+
+                std::vector<std::string> vec2 = grpjs["users"];
+                for (std::string &userstr : vec2)
+                {
+                    GroupUser user;
+                    json js = json::parse(userstr);
+                    user.setId(js["id"].get<int>());
+                    user.setName(js["name"]);
+                    user.setState(js["state"]);
+                    user.setRole(js["role"]);
+                    group.getUsers().push_back(user);
+                }
+                g_currentUserGroupList.push_back(group);
+            }
+        }
+        // 显示用户信息
+        showCurrentUserData();
+        // 接收离线消息
+        if (responsejs.contains("offlinemsg"))
+        {
+            std::vector<std::string> vec = responsejs["offlinemsg"];
+            for (std::string &str : vec)
+            {
+                json js = json::parse(str);
+                int msgtype = js["msgid"].get<int>();
+                if (ONE_CHAT_MSG == msgtype)
+                {
+                    std::cout << js["time"].get<std::string>() << "[" << js["id"] << "]"
+                              << js["name"].get<std::string>() << "said: "
+                              << js["msg"].get<std::string>() << std::endl;
+                }
+                else if (GROUP_CHAT_MSG == msgtype)
+                {
+                    std::cout << "群消息[" << js["groupid"] << "]"
+                              << js["time"].get<std::string>() << "[" << js["id"] << "]"
+                              << js["name"].get<std::string>() << "said: "
+                              << js["msg"].get<std::string>() << std::endl;
+                }
+            }
+        }
+        g_isLoginSuccess = true;
+    }
 }
 
 void showCurrentUserData()
@@ -342,7 +339,8 @@ void readTaskHandler(int clientfd)
 
         // 接收服务器转发的数据
         json js = json::parse(buffer);
-        if (ONE_CHAT_MSG == js["msgid"].get<int>())
+        int msgtype = js["msgid"].get<int>();
+        if (ONE_CHAT_MSG == msgtype)
         {
             std::cout << js["time"].get<std::string>() << "[" << js["id"] << "]"
                       << js["name"].get<std::string>() << "said: "
@@ -350,12 +348,24 @@ void readTaskHandler(int clientfd)
             continue;
         }
 
-        if (GROUP_CHAT_MSG == js["msgid"].get<int>())
+        if (GROUP_CHAT_MSG == msgtype)
         {
             std::cout << "群消息[" << js["groupid"] << "]"
                       << js["time"].get<std::string>() << "[" << js["id"] << "]"
                       << js["name"].get<std::string>() << "said: "
                       << js["msg"].get<std::string>() << std::endl;
+            continue;
+        }
+        if (LOGIN_MSG_ACK == msgtype)
+        {
+            doLoginResponse(js); // 处理登陆响应
+            sem_post(&rwsem);
+            continue;
+        }
+        if (REG_MSG_ACK == msgtype)
+        {
+            doRegResponse(js); // 处理登陆响应
+            sem_post(&rwsem);
             continue;
         }
     }
@@ -425,6 +435,7 @@ void chat(int clientfd, std::string str)
         std::cerr << "send chat msg error ->" << buffer << std::endl;
     }
 }
+
 void addfriend(int clientfd, std::string str)
 {
     int friendid = atoi(str.c_str());
@@ -439,6 +450,7 @@ void addfriend(int clientfd, std::string str)
         std::cerr << "send addfriend msg error ->" << buffer << std::endl;
     }
 }
+
 void creategroup(int clientfd, std::string str)
 {
     int idx = str.find(":");
@@ -463,6 +475,7 @@ void creategroup(int clientfd, std::string str)
         std::cerr << "send creategroup msg error ->" << buffer << std::endl;
     }
 }
+
 void addgroup(int clientfd, std::string str)
 {
     int groupid = atoi(str.c_str());
@@ -477,6 +490,7 @@ void addgroup(int clientfd, std::string str)
         std::cerr << "send addfriend msg error ->" << buffer << std::endl;
     }
 }
+
 void groupchat(int clientfd, std::string str)
 {
     int idx = str.find(":");
@@ -503,6 +517,7 @@ void groupchat(int clientfd, std::string str)
         std::cerr << "send chat msg error ->" << buffer << std::endl;
     }
 }
+
 void loginout(int clientfd, std::string)
 {
     json js;
