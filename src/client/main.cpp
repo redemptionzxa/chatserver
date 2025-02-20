@@ -134,7 +134,7 @@ int main(int argc, char *argv[])
             js["id"] = id;
             js["password"] = pwd;
             std::string request = js.dump();
-
+            const char* ch = request.c_str();
             g_isLoginSuccess = false;
 
             int len = send(clientfd, request.c_str(), strlen(request.c_str()) + 1, 0);

@@ -47,7 +47,6 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
     int id = js["id"].get<int>();
     std::string pwd = js["password"];
-
     User user = _userModel.query(id);
     if (user.getId() == id && user.getPwd() == pwd)
     {
