@@ -8,7 +8,7 @@
 
 static std::string server = "127.0.0.1";
 static std::string user = "root";
-static std::string password = "as123456z";
+static std::string password = "";
 static std::string dbname = "chat";
 
 class MySQL
